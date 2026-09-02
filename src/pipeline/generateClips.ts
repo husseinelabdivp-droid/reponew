@@ -32,10 +32,12 @@ export async function generateClips(
       const duration = moment.end_time - moment.start_time;
 
       // -ss before -i is fast-seek; re-encoding (not -c copy) so cuts land on exact timestamps.
+      // preset ultrafast + single thread keeps memory use low enough to survive
+      // Railway's default container memory limits.
       execSync(
         `ffmpeg -y -ss ${moment.start_time} -i "${sourcePath}" -t ${duration} ` +
           `-vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" ` +
-          `-c:v libx264 -preset fast -c:a aac "${outPath}"`,
+          `-c:v libx264 -preset ultrafast -threads 1 -c:a aac "${outPath}"`,
         { stdio: "pipe" }
       );
 
