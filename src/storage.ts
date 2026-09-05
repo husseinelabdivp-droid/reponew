@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { r2, R2_BUCKET, R2_PUBLIC_URL, GetObjectCommand, PutObjectCommand } from "./r2.js";
 
 /**
@@ -29,12 +30,9 @@ export async function downloadSourceVideo(
   if (!body) {
     throw new Error(`Failed to download source video (${key}): empty response body`);
   }
-  const chunks: Buffer[] = [];
+  const writeStream = fs.createWriteStream(destPath);
   // @ts-ignore - Body is a Node Readable stream in the Node runtime
-  for await (const chunk of body) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  fs.writeFileSync(destPath, Buffer.concat(chunks));
+  await pipeline(body, writeStream);
 }
 
 export async function uploadClip(
@@ -44,13 +42,14 @@ export async function uploadClip(
   fileName: string
 ): Promise<string> {
   const key = `clips/${userId}/${projectId}/${fileName}`;
-  const fileBuffer = fs.readFileSync(localFilePath);
+  const stats = fs.statSync(localFilePath);
   await r2.send(
     new PutObjectCommand({
       Bucket: R2_BUCKET,
       Key: key,
-      Body: fileBuffer,
+      Body: fs.createReadStream(localFilePath),
       ContentType: "video/mp4",
+      ContentLength: stats.size,
     })
   );
   return key;
