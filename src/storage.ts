@@ -1,45 +1,40 @@
-import { supabase } from "./supabase.js";
 import fs from "node:fs";
-
-const VIDEOS_BUCKET = "videos";
-const CLIPS_BUCKET = "clips"; // adjust if your output bucket has a different name
+import { r2, R2_BUCKET, R2_PUBLIC_URL, GetObjectCommand, PutObjectCommand } from "./r2.js";
 
 /**
- * projects.original_video_url may be stored as either:
- *  - a bare storage path, e.g. "userId/filename.mp4"
- *  - a full URL (public or signed), e.g. ".../object/public/videos/userId/filename.mp4?..."
- * This normalizes either form down to the bucket-relative path.
+ * projects.original_video_url is a full R2 public URL, e.g.
+ * https://pub-xxxx.r2.dev/videos/{userId}/{projectId}/original.mp4
+ * This normalizes it down to the bucket-relative object key.
  */
-function toStoragePath(originalVideoUrl: string): string {
+function toObjectKey(originalVideoUrl: string): string {
   if (!originalVideoUrl.startsWith("http")) {
     return originalVideoUrl;
   }
-  const marker = `/${VIDEOS_BUCKET}/`;
-  const idx = originalVideoUrl.indexOf(marker);
-  if (idx === -1) {
+  const prefix = `${R2_PUBLIC_URL}/`;
+  if (!originalVideoUrl.startsWith(prefix)) {
     throw new Error(
-      `Could not extract storage path from original_video_url: ${originalVideoUrl}`
+      `Unexpected video URL host, expected it to start with ${prefix}: ${originalVideoUrl}`
     );
   }
-  const afterBucket = originalVideoUrl.slice(idx + marker.length);
-  return afterBucket.split("?")[0]; // strip any signed-url query params
+  return originalVideoUrl.slice(prefix.length);
 }
 
 export async function downloadSourceVideo(
   originalVideoUrl: string,
   destPath: string
 ): Promise<void> {
-  const path = toStoragePath(originalVideoUrl);
-  const { data, error } = await supabase.storage
-    .from(VIDEOS_BUCKET)
-    .download(path);
-
-  if (error || !data) {
-    throw new Error(`Failed to download source video (${path}): ${error?.message}`);
+  const key = toObjectKey(originalVideoUrl);
+  const result = await r2.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+  const body = result.Body;
+  if (!body) {
+    throw new Error(`Failed to download source video (${key}): empty response body`);
   }
-
-  const buffer = Buffer.from(await data.arrayBuffer());
-  fs.writeFileSync(destPath, buffer);
+  const chunks: Buffer[] = [];
+  // @ts-ignore - Body is a Node Readable stream in the Node runtime
+  for await (const chunk of body) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  fs.writeFileSync(destPath, Buffer.concat(chunks));
 }
 
 export async function uploadClip(
@@ -48,19 +43,15 @@ export async function uploadClip(
   localFilePath: string,
   fileName: string
 ): Promise<string> {
-  const storagePath = `${userId}/${projectId}/${fileName}`;
+  const key = `clips/${userId}/${projectId}/${fileName}`;
   const fileBuffer = fs.readFileSync(localFilePath);
-
-  const { error } = await supabase.storage
-    .from(CLIPS_BUCKET)
-    .upload(storagePath, fileBuffer, {
-      contentType: "video/mp4",
-      upsert: true,
-    });
-
-  if (error) {
-    throw new Error(`Failed to upload clip (${storagePath}): ${error.message}`);
-  }
-
-  return storagePath;
+  await r2.send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: key,
+      Body: fileBuffer,
+      ContentType: "video/mp4",
+    })
+  );
+  return key;
 }
